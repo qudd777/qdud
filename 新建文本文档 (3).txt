@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>好友棋牌</title>
+<style>
+:root{--bg:#0f172a;--panel:#1e293b;--line:#334155;--text:#e5e7eb;--muted:#94a3b8;--accent:#f59e0b;--danger:#ef4444;--ok:#22c55e}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;font-size:16px}
+#app{display:flex;flex-direction:column;height:100vh;height:100dvh;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+#login{flex:1;display:flex;flex-direction:column;justify-content:center;padding:24px;gap:14px}
+#login h1{font-size:24px;text-align:center;margin:0 0 16px;letter-spacing:2px}
+#login input{font-size:17px;padding:15px;border-radius:14px;border:1px solid var(--line);background:var(--panel);color:var(--text);width:100%;outline:none}
+#login button{font-size:17px;padding:15px;border-radius:14px;border:none;background:var(--accent);color:#111;font-weight:800;width:100%}
+#login .row{display:flex;gap:10px}
+#login .row input{flex:1;min-width:0}
+#login .row button{width:110px;flex:0 0 auto}
+#game{flex:1;display:none;flex-direction:column;overflow:hidden}
+#topbar{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 12px;background:var(--panel);border-bottom:1px solid var(--line);font-size:13px}
+#topbar b{color:var(--accent);font-size:15px}
+#main{flex:1;overflow-y:auto;padding:10px 12px;-webkit-overflow-scrolling:touch}
+#info{font-size:13px;color:var(--muted);padding:4px 0 10px;display:flex;justify-content:space-between}
+#players{display:flex;flex-direction:column;gap:8px}
+.pcard{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 12px;display:flex;flex-direction:column;gap:5px}
+.pcard.active{border-color:var(--accent);box-shadow:0 0 0 2px rgba(245,158,11,.25)}
+.pcard .l1{display:flex;justify-content:space-between;align-items:center;font-weight:800;font-size:15px}
+.pcard .l2{color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:6px}
+.tag{display:inline-block;padding:2px 7px;border-radius:7px;font-size:11px;background:#0b1220;border:1px solid var(--line)}
+.tag.dealer{color:var(--accent);border-color:var(--accent)}
+.tag.offline{color:var(--danger);border-color:var(--danger)}
+.tag.me{color:var(--ok);border-color:var(--ok)}
+#result{margin-top:10px;padding:12px;background:var(--panel);border-radius:14px;font-size:13px;display:none}
+#result h3{margin:0 0 8px;font-size:15px;color:var(--ok)}
+#result p{margin:4px 0;color:var(--muted)}
+#result ul{margin:8px 0 0;padding-left:18px}
+#result li{margin:5px 0}
+#handWrap{border-top:1px solid var(--line);background:#0b1220;padding:8px 0 6px}
+#handTitle{padding:0 12px 6px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between}
+#hand{display:flex;gap:8px;overflow-x:auto;padding:6px 12px 10px;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+#hand::-webkit-scrollbar{display:none}
+.card{flex:0 0 auto;width:50px;height:72px;border-radius:10px;border:2px solid transparent;background:#f8fafc;color:#111827;font-weight:800;font-size:17px;display:flex;flex-direction:column;align-items:center;justify-content:center;line-height:1.1;user-select:none;transition:transform .1s}
+.card .suit{font-size:15px}
+.card.red{color:#dc2626}
+.card.sel{border-color:var(--accent);background:#fef3c7;transform:translateY(-8px)}
+#hostBar{display:none;gap:10px;padding:0 12px 8px;background:#0b1220}
+#hostBar button{flex:1;font-size:15px;padding:13px;border-radius:13px;border:1px solid var(--line);background:var(--panel);color:var(--text);font-weight:800}
+#actions{display:flex;gap:10px;padding:4px 12px 12px;background:#0b1220}
+#actions button{flex:1;font-size:17px;padding:15px;border-radius:13px;border:none;font-weight:800}
+#actions .pass{background:var(--panel);color:var(--text);border:1px solid var(--line)}
+#actions .play{background:var(--accent);color:#111}
+#actions button:disabled{opacity:.35}
+#toast{position:fixed;left:50%;bottom:140px;transform:translateX(-50%);background:rgba(0,0,0,.88);color:#fff;padding:10px 18px;border-radius:12px;font-size:14px;z-index:99;display:none;max-width:82%;text-align:center}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="login">
+    <h1>好友棋牌</h1>
+    <input id="name" placeholder="输入昵称" maxlength="8" autocomplete="off">
+    <button id="create">创建房间</button>
+    <div class="row">
+      <input id="roomInput" placeholder="房间码" inputmode="numeric" maxlength="6" autocomplete="off">
+      <button id="join">加入</button>
+    </div>
+  </div>
+
+  <div id="game">
+    <div id="topbar">
+      <div>房间 <b id="roomId">-</b></div>
+      <div>倍数 <b id="mult">1</b></div>
+      <div id="status">-</div>
+    </div>
+    <div id="main">
+      <div id="info"><span id="currentTxt"></span><span id="lastPlayTxt"></span></div>
+      <div id="players"></div>
+      <div id="result"></div>
+    </div>
+    <div id="handWrap">
+      <div id="handTitle"><span>我的手牌</span><span id="handCount"></span></div>
+      <div id="hand"></div>
+    </div>
+    <div id="hostBar">
+      <button id="start">开始 / 下一局</button>
+      <button id="reset">重置房间</button>
+    </div>
+    <div id="actions">
+      <button id="pass" class="pass">不要</button>
+      <button id="play" class="play">出牌</button>
+    </div>
+  </div>
+  <div id="toast"></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+(function(){
+  const socket=io();
+  const $=id=>document.getElementById(id);
+  const playerId=localStorage.getItem('playerId')||(crypto.randomUUID?crypto.randomUUID():'p'+Math.random().toString(36).slice(2));
+  localStorage.setItem('playerId',playerId);
+  let state=null, selected=new Set(), toastTimer=null;
+
+  function toast(m){
+    const el=$('toast'); el.textContent=m; el.style.display='block';
+    clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.style.display='none',2200);
+  }
+  function name(){ return ($('name').value||'').trim()||'玩家'; }
+  function esc(s){ return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+  function tryReconnect(){
+    const rid=localStorage.getItem('roomId'); if(!rid) return;
+    $('roomInput').value=rid;
+    socket.emit('joinRoom',{roomId:rid,playerId,name:name()},r=>{
+      if(!r||!r.ok) console.warn('重连失败',r&&r.error);
+    });
+  }
+  socket.on('connect',tryReconnect);
+  if(socket.connected) tryReconnect();
+
+  socket.on('state',s=>{ state=s; localStorage.setItem('roomId',s.roomId); selected.clear(); render(); });
+
+  function render(){
+    if(!state) return;
+    $('login').style.display='none'; $('game').style.display='flex';
+    $('roomId').textContent=state.roomId;
+    $('mult').textContent=state.bomb;
+    $('status').textContent=state.status==='waiting'?'等待中':state.status==='playing'?'进行中':'已结束';
+    const cur=state.status==='playing'&&state.players[state.cur];
+    $('currentTxt').textContent=cur?'当前：'+cur.name:'';
+    $('lastPlayTxt').textContent=state.last?'上家：'+state.last.label:'';
+
+    $('players').innerHTML=state.players.map((p,i)=>{
+      const tags=[];
+      if(i===state.dealer) tags.push('<span class="tag dealer">庄</span>');
+      if(p.id===state.yourId) tags.push('<span class="tag me">我</span>');
+      if(!p.online) tags.push('<span class="tag offline">离线</span>');
+      const lost=p.lost!=null?' · 本局输 '+p.lost:'';
+      return '<div class="pcard '+(i===state.cur&&state.status==='playing'?'active':'')+'">'
+        +'<div class="l1"><span>'+esc(p.name)+' '+tags.join('')+'</span><span>手牌 '+p.handCount+'</span></div>'
+        +'<div class="l2"><span>出牌 '+p.playCnt+' 次</span><span>累计输分 '+(p.totalLost||0)+lost+'</span></div>'
+        +'</div>';
+    }).join('');
+
+    $('hand').innerHTML=state.yourHand.map(c=>{
+      const sel=selected.has(c.id)?'sel':'';
+      const red=(c.suit==='♥'||c.suit==='♦')?'red':'';
+      return '<div class="card '+red+' '+sel+'" data-id="'+c.id+'"><span>'+c.rank+'</span><span class="suit">'+(c.suit||'')+'</span></div>';
+    }).join('');
+    $('handCount').textContent=state.yourHand.length+' 张';
+
+    document.querySelectorAll('.card').forEach(el=>{
+      el.onclick=()=>{ const id=el.dataset.id; selected.has(id)?selected.delete(id):selected.add(id); render(); };
+    });
+
+    if(state.result){
+      const r=state.result;
+      $('result').style.display='block';
+      $('result').innerHTML='<h3>'+esc(r.winnerName)+' 获胜 · 获得 '+r.gain+'</h3>'
+        +'<p>公共倍数 '+r.bomb+' · 底分 '+state.bottom+'</p >'
+        +'<ul>'+r.losers.map(l=>'<li>'+esc(l.name)+' 输 '+l.lost
+          +'<br><span style="color:#94a3b8">剩余 '+l.remaining+' 张 × '+l.rm+(l.spring===2?' · 春天×2':'')+'</span></li>').join('')+'</ul>';
+    } else $('result').style.display='none';
+
+    const mi=state.players.findIndex(p=>p.id===state.yourId);
+    const myTurn=state.status==='playing'&&state.cur===mi;
+    const host=state.yourId===(state.players[0]&&state.players[0].id);
+    $('hostBar').style.display=host?'flex':'none';
+    $('start').style.display=state.status!=='playing'?'block':'none';
+    $('reset').style.display=state.status==='playing'?'block':'none';
+    $('play').disabled=!myTurn;
+    $('pass').disabled=!myTurn||!state.last;
+  }
+
+  function emit(ev,d){ socket.emit(ev,d,r=>{ if(!r||!r.ok) toast((r&&r.error)||'操作失败'); }); }
+
+  $('create').onclick=()=>socket.emit('createRoom',{playerId,name:name()},r=>{
+    if(!r.ok) return toast(r.error);
+    localStorage.setItem('roomId',r.roomId);
+  });
+  $('join').onclick=()=>{
+    const rid=$('roomInput').value.trim(); if(!rid) return toast('输入房间码');
+    socket.emit('joinRoom',{roomId:rid,playerId,name:name()},r=>{
+      if(!r.ok) return toast(r.error);
+      localStorage.setItem('roomId',rid);
+    });
+  };
+  $('start').onclick=()=>state&&emit('startGame',{roomId:state.roomId,playerId});
+  $('reset').onclick=()=>{ if(!state) return; if(!confirm('重置？累计输分保留'))return; emit('resetRoom',{roomId:state.roomId,playerId}); };
+  $('play').onclick=()=>{ if(!state) return; if(!selected.size) return toast('选牌'); emit('play',{roomId:state.roomId,playerId,cardIds:[...selected]}); };
+  $('pass').onclick=()=>state&&emit('pass',{roomId:state.roomId,playerId});
+})();
+</script>
+</body>
+</html>

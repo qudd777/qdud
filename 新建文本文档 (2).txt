@@ -1,0 +1,310 @@
+const express = require('express');
+const http = require('http');
+const path = require('path');
+const { Server } = require('socket.io');
+
+// ============ 规则引擎 ============
+const RANKS = ['3','4','5','6','7','8','9','10','J','Q','K','A','2'];
+const RV = Object.fromEntries(RANKS.map((r,i)=>[r,i+1]));
+const SUITS = ['♠','♥','♣','♦'];
+const SJ = '小王', BJ = '大王';
+
+function makeDeck(){
+  const d=[];
+  for(const s of SUITS) for(const r of RANKS) d.push({id:r+s,rank:r,suit:s,joker:false});
+  d.push({id:'SJ',rank:SJ,suit:'',joker:true});
+  d.push({id:'BJ',rank:BJ,suit:'',joker:true});
+  return d;
+}
+const isJ = c => c && (c.rank===SJ || c.rank===BJ);
+const cVal = c => isJ(c) ? (c.rank===BJ?101:100) : RV[c.rank];
+const sortC = a => [...a].sort((x,y)=>cVal(x)-cVal(y)||x.id.localeCompare(y.id));
+const jCnt = a => a.filter(isJ).length;
+const isBomb = t => t==='softbomb'||t==='bomb'||t==='kingbomb';
+
+function parsePlay(cards){
+  if(!Array.isArray(cards)||!cards.length) return {ok:false,error:'未选牌'};
+  const ids=new Set();
+  for(const c of cards){
+    if(!c||!c.id) return {ok:false,error:'牌错误'};
+    if(ids.has(c.id)) return {ok:false,error:'重复牌'};
+    ids.add(c.id);
+  }
+  const n=cards.length;
+  const jk=cards.filter(isJ), non=cards.filter(c=>!isJ(c));
+  const hasJ=jk.length>0;
+  const sameNon=non.length>0 && non.every(c=>c.rank===non[0].rank);
+  const nRank=non.length?non[0].rank:null;
+  const mk=(type,rank,len=n)=>({
+    ok:true,type,rank,
+    rankValue:rank==='王炸'?999:RV[rank],
+    length:len,
+    label: type==='kingbomb'?'王炸':
+           type==='softbomb'?`软炸 ${rank}`:
+           type==='bomb'?`炸弹 ${rank}`:
+           (type==='straight'||type==='pairchain')?
+             `${type==='straight'?'顺子':'连对'} ${len}张(最小${rank})`:
+             `${type==='pair'?'对子':'单张'} ${rank}`,
+    cardIds:cards.map(c=>c.id)
+  });
+
+  if(n===2 && jk.length===2) return mk('kingbomb','王炸',2);
+  if(n===1){
+    if(hasJ) return {ok:false,error:'王不能单出'};
+    return mk('single',cards[0].rank,1);
+  }
+  if(n===2){
+    if(hasJ){
+      if(jk.length===1 && non.length===1 && non[0].rank!=='2') return mk('pair',non[0].rank,2);
+      return {ok:false,error:'王不能替代2或与王组对'};
+    }
+    if(cards[0].rank===cards[1].rank) return mk('pair',cards[0].rank,2);
+    return {ok:false,error:'不是对子'};
+  }
+  if(n===3){
+    if(non.length && sameNon && (!hasJ||nRank!=='2')) return mk('softbomb',nRank,3);
+    if(!hasJ && !cards.some(c=>c.rank==='2')){
+      const v=cards.map(c=>RV[c.rank]).sort((a,b)=>a-b);
+      if(v[1]===v[0]+1 && v[2]===v[0]+2) return mk('straight',RANKS[v[0]-1],3);
+    }
+    return {ok:false,error:'不是软炸或顺子'};
+  }
+  if(n===4){
+    if(non.length && sameNon && (!hasJ||nRank!=='2')) return mk('bomb',nRank,4);
+    if(!hasJ && !cards.some(c=>c.rank==='2')){
+      const cnt={}; cards.forEach(c=>cnt[c.rank]=(cnt[c.rank]||0)+1);
+      const rs=Object.keys(cnt);
+      if(rs.length===2 && rs.every(r=>cnt[r]===2)){
+        const v=rs.map(r=>RV[r]).sort((a,b)=>a-b);
+        if(v[1]===v[0]+1) return mk('pairchain',RANKS[v[0]-1],4);
+      }
+      const v=cards.map(c=>RV[c.rank]).sort((a,b)=>a-b);
+      let st=true; for(let i=1;i<4;i++) if(v[i]!==v[0]+i) st=false;
+      if(st) return mk('straight',RANKS[v[0]-1],4);
+    }
+    return {ok:false,error:'不是炸弹/连对/顺子'};
+  }
+  if(!hasJ && !cards.some(c=>c.rank==='2')){
+    const v=cards.map(c=>RV[c.rank]).sort((a,b)=>a-b);
+    let st=true; for(let i=1;i<n;i++) if(v[i]!==v[0]+i) st=false;
+    if(st) return mk('straight',RANKS[v[0]-1],n);
+    if(n%2===0){
+      const cnt={}; cards.forEach(c=>cnt[c.rank]=(cnt[c.rank]||0)+1);
+      const rs=Object.keys(cnt);
+      if(rs.length===n/2 && rs.every(r=>cnt[r]===2)){
+        const v2=rs.map(r=>RV[r]).sort((a,b)=>a-b);
+        let ch=true; for(let i=1;i<v2.length;i++) if(v2[i]!==v2[0]+i) ch=false;
+        if(ch) return mk('pairchain',RANKS[v2[0]-1],n);
+      }
+    }
+  }
+  return {ok:false,error:'不支持的牌型'};
+}
+
+function canBeat(p,last){
+  if(!p||!p.ok) return false;
+  if(!last) return true;
+  if(p.type==='kingbomb') return last.type!=='kingbomb';
+  if(isBomb(p.type)){
+    if(!isBomb(last.type)) return true;
+    if(last.type==='kingbomb') return false;
+    if(p.type==='bomb' && last.type==='softbomb') return true;
+    if(p.type==='softbomb' && last.type==='bomb') return false;
+    return p.rankValue>last.rankValue;
+  }
+  if(isBomb(last.type)) return false;
+  if(p.type!==last.type||p.length!==last.length) return false;
+  if(p.type==='single'||p.type==='pair'){
+    if(last.rankValue===RV['2']) return false;
+    if(p.rankValue===RV['2']) return true;
+    return p.rankValue===last.rankValue+1;
+  }
+  if(p.type==='straight'||p.type==='pairchain') return p.rankValue===last.rankValue+1;
+  return false;
+}
+
+function remainMult(hand){ return hand.length*Math.pow(2,jCnt(hand)); }
+
+function calcLost({hand,winnerIsDealer,loserIsDealer,loserPlayCnt,dealerPlayCnt,bombMult,bottom}){
+  let spring=1;
+  if(winnerIsDealer){ if(loserPlayCnt===0) spring=2; }
+  else { if(loserIsDealer && dealerPlayCnt<=1) spring=2; }
+  const rm=remainMult(hand);
+  return { lost:bottom*bombMult*rm*spring, rm, spring };
+}
+
+// ============ 服务端 ============
+const app=express();
+const server=http.createServer(app);
+const io=new Server(server,{cors:{origin:'*'}});
+const PORT=process.env.PORT||3000;
+
+app.get('/',(req,res)=>res.sendFile(path.join(__dirname,'index.html')));
+
+const scores={};
+const rooms=new Map();
+const meta=new Map();
+
+function genId(){ let id; do{ id=String(Math.floor(100000+Math.random()*900000)); }while(rooms.has(id)); return id; }
+function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
+function createRoom(pid,name,sid){
+  const r={ id:genId(),players:[],status:'waiting',dealer:null,nextDealer:null,cur:null,
+    last:null,lastIdx:null,pass:0,bomb:1,bottom:1,round:0,result:null };
+  addPlayer(r,pid,name,sid);
+  rooms.set(r.id,r);
+  return r;
+}
+function addPlayer(r,pid,name,sid){
+  const e=r.players.find(p=>p.id===pid);
+  if(e){ e.socketId=sid; e.online=true; if(name) e.name=name; return e; }
+  if(r.status!=='waiting') throw new Error('对局已开始');
+  if(r.players.length>=3) throw new Error('房间已满');
+  const p={ id:pid,name:name||`玩家${pid.slice(-4)}`,socketId:sid,hand:[],playCnt:0,online:true,lost:null };
+  r.players.push(p);
+  return p;
+}
+function startGame(r,pid){
+  if(r.players.length!==3) throw new Error('需要3人');
+  if(r.players[0].id!==pid) throw new Error('仅房主可开始');
+  if(r.status==='playing') throw new Error('进行中');
+  if(r.players.some(p=>!p.online)) throw new Error('有玩家离线');
+  const deck=shuffle(makeDeck());
+  const di=r.nextDealer!=null?r.nextDealer:Math.floor(Math.random()*3);
+  r.players.forEach((p,i)=>{
+    p.hand=sortC(deck.splice(0,i===di?6:5));
+    p.playCnt=0; p.lost=null; p.online=true;
+  });
+  r.status='playing'; r.dealer=di; r.cur=di; r.last=null; r.lastIdx=null;
+  r.pass=0; r.bomb=1; r.round++; r.result=null; r.nextDealer=null;
+}
+function resetRoom(r,pid){
+  if(r.players[0].id!==pid) throw new Error('仅房主可重置');
+  r.status='waiting'; r.dealer=null; r.cur=null; r.last=null; r.lastIdx=null;
+  r.pass=0; r.bomb=1; r.result=null; r.nextDealer=null;
+  r.players.forEach(p=>{ p.hand=[]; p.playCnt=0; p.lost=null; });
+}
+function playCards(r,pid,ids){
+  if(r.status!=='playing') throw new Error('不在对局');
+  const i=r.players.findIndex(p=>p.id===pid);
+  if(i<0) throw new Error('玩家不在房间');
+  if(r.cur!==i) throw new Error('没轮到你');
+  if(!Array.isArray(ids)||!ids.length) throw new Error('未选牌');
+  const p=r.players[i];
+  const set=new Set(ids);
+  if(set.size!==ids.length) throw new Error('重复牌');
+  const sel=p.hand.filter(c=>set.has(c.id));
+  if(sel.length!==ids.length) throw new Error('手牌不存在');
+  const pl=parsePlay(sel);
+  if(!pl.ok) throw new Error(pl.error);
+  if(!canBeat(pl,r.last)) throw new Error('压不过上家');
+  p.hand=p.hand.filter(c=>!set.has(c.id));
+  p.playCnt++;
+  if(pl.type==='softbomb') r.bomb*=2;
+  else if(pl.type==='bomb') r.bomb*=4;
+  else if(pl.type==='kingbomb') r.bomb*=8;
+  r.last=pl; r.lastIdx=i; r.pass=0;
+  if(p.hand.length===0){ endGame(r); return; }
+  r.cur=(i+1)%3;
+}
+function passTurn(r,pid){
+  if(r.status!=='playing') throw new Error('不在对局');
+  const i=r.players.findIndex(p=>p.id===pid);
+  if(i<0) throw new Error('玩家不在房间');
+  if(r.cur!==i) throw new Error('没轮到你');
+  if(!r.last) throw new Error('领出不能过');
+  r.pass++;
+  if(r.pass>=r.players.length-1){ r.last=null; r.cur=r.lastIdx; r.pass=0; }
+  else r.cur=(i+1)%3;
+}
+function endGame(r){
+  r.status='ended';
+  const wi=r.players.findIndex(p=>p.hand.length===0);
+  const w=r.players[wi];
+  const wDealer=wi===r.dealer;
+  let gain=0;
+  const losers=[];
+  r.players.forEach((p,i)=>{
+    if(i===wi) return;
+    const c=calcLost({
+      hand:p.hand,winnerIsDealer:wDealer,loserIsDealer:i===r.dealer,
+      loserPlayCnt:p.playCnt,dealerPlayCnt:r.players[r.dealer].playCnt,
+      bombMult:r.bomb,bottom:r.bottom
+    });
+    p.lost=c.lost; gain+=c.lost;
+    losers.push({ name:p.name,lost:c.lost,remaining:p.hand.length,rm:c.rm,spring:c.spring });
+    const old=scores[p.id]||{totalLost:0,games:0};
+    old.totalLost+=c.lost; old.games++;
+    scores[p.id]=old;
+  });
+  r.result={ winnerName:w.name,wDealer,gain,bomb:r.bomb,losers,round:r.round };
+  r.nextDealer=wi;
+}
+function serialize(r,vid){
+  const v=r.players.find(p=>p.id===vid);
+  return {
+    roomId:r.id,status:r.status,dealer:r.dealer,cur:r.cur,last:r.last,
+    bomb:r.bomb,bottom:r.bottom,round:r.round,result:r.result,
+    players:r.players.map((p,i)=>({
+      id:p.id,name:p.name,seat:i,online:p.online,handCount:p.hand.length,
+      playCnt:p.playCnt,lost:p.lost,totalLost:(scores[p.id]||{}).totalLost||0
+    })),
+    yourId:vid, yourHand:v?sortC(v.hand):[]
+  };
+}
+function broadcast(r){
+  for(const p of r.players) if(p.online&&p.socketId) io.to(p.socketId).emit('state',serialize(r,p.id));
+}
+function wrap(cb,fn){
+  try{ const res=fn(); if(cb) cb({ok:true,...(res||{})}); }
+  catch(e){ if(cb) cb({ok:false,error:e.message}); }
+}
+
+io.on('connection',socket=>{
+  socket.on('createRoom',(d,cb)=>wrap(cb,()=>{
+    const {playerId,name}=d||{};
+    if(!playerId) throw new Error('缺少玩家ID');
+    const r=createRoom(playerId,name,socket.id);
+    meta.set(socket.id,{roomId:r.id,playerId});
+    socket.join(r.id); broadcast(r);
+    return {roomId:r.id};
+  }));
+  socket.on('joinRoom',(d,cb)=>wrap(cb,()=>{
+    const {roomId,playerId,name}=d||{};
+    const r=rooms.get(roomId);
+    if(!r) throw new Error('房间不存在');
+    addPlayer(r,playerId,name,socket.id);
+    meta.set(socket.id,{roomId,playerId});
+    socket.join(roomId); broadcast(r);
+    return {roomId};
+  }));
+  socket.on('startGame',(d,cb)=>wrap(cb,()=>{
+    const r=rooms.get(d&&d.roomId);
+    if(!r) throw new Error('房间不存在');
+    startGame(r,d.playerId); broadcast(r);
+  }));
+  socket.on('resetRoom',(d,cb)=>wrap(cb,()=>{
+    const r=rooms.get(d&&d.roomId);
+    if(!r) throw new Error('房间不存在');
+    resetRoom(r,d.playerId); broadcast(r);
+  }));
+  socket.on('play',(d,cb)=>wrap(cb,()=>{
+    const r=rooms.get(d&&d.roomId);
+    if(!r) throw new Error('房间不存在');
+    playCards(r,d.playerId,d.cardIds); broadcast(r);
+  }));
+  socket.on('pass',(d,cb)=>wrap(cb,()=>{
+    const r=rooms.get(d&&d.roomId);
+    if(!r) throw new Error('房间不存在');
+    passTurn(r,d.playerId); broadcast(r);
+  }));
+  socket.on('disconnect',()=>{
+    const m=meta.get(socket.id); if(!m) return;
+    const r=rooms.get(m.roomId);
+    if(r){ const p=r.players.find(x=>x.id===m.playerId);
+      if(p&&p.socketId===socket.id){ p.online=false; broadcast(r); } }
+    meta.delete(socket.id);
+  });
+});
+
+server.listen(PORT,'0.0.0.0',()=>console.log('http://localhost:'+PORT));
